@@ -97,7 +97,7 @@ Start from a clean, green `main`.
 6. Verify the result:
 
    ```bash
-   gh release view v0.2.0 --json tagName,isPrerelease,isLatest,assets
+   gh release view v0.2.0 --json tagName,isPrerelease,assets
    gh release download v0.2.0 --pattern "SHA256SUMS" --dir /tmp/verso-release
    ```
 
