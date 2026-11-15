@@ -13,7 +13,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, StyleSheet1
 from reportlab.lib.units import mm
@@ -161,6 +161,97 @@ def _styles() -> StyleSheet1:
             spaceAfter=6,
         )
     )
+    # Screenplay styles. Courier 12 is the industry-standard spec-script font;
+    # the indents approximate the usual character/dialogue offsets.
+    styles.add(
+        ParagraphStyle(
+            "FScene",
+            fontName="Courier-Bold",
+            fontSize=12,
+            leading=15,
+            spaceBefore=16,
+            spaceAfter=12,
+            keepWithNext=True,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            "FAction",
+            fontName="Courier",
+            fontSize=12,
+            leading=15,
+            spaceAfter=12,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            "FCharacter",
+            fontName="Courier",
+            fontSize=12,
+            leading=15,
+            leftIndent=92,
+            spaceBefore=12,
+            firstLineIndent=0,
+            keepWithNext=True,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            "FParenthetical",
+            fontName="Courier-Oblique",
+            fontSize=12,
+            leading=15,
+            leftIndent=72,
+            rightIndent=90,
+            firstLineIndent=0,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            "FDialogue",
+            fontName="Courier",
+            fontSize=12,
+            leading=15,
+            leftIndent=50,
+            rightIndent=72,
+            firstLineIndent=0,
+            spaceAfter=12,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            "FTransition",
+            fontName="Courier",
+            fontSize=12,
+            leading=15,
+            alignment=TA_RIGHT,
+            spaceBefore=6,
+            spaceAfter=12,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            "FSection",
+            fontName="Courier-Bold",
+            fontSize=12,
+            leading=15,
+            alignment=TA_CENTER,
+            spaceBefore=20,
+            spaceAfter=12,
+            keepWithNext=True,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            "FCenter",
+            fontName="Courier",
+            fontSize=12,
+            leading=15,
+            alignment=TA_CENTER,
+            spaceBefore=12,
+            spaceAfter=12,
+        )
+    )
     return styles
 
 
@@ -226,6 +317,135 @@ def _flowables(text: str, styles: StyleSheet1) -> list:
     return flow
 
 
+_SCENE_PREFIXES = ("INT.", "EXT.", "EST.", "INT./EXT.", "INT/EXT", "I/E")
+_TRANSITION_ENDINGS = ("TO:",)
+
+
+def _scene_heading(line: str) -> tuple[str, bool]:
+    """Return (heading text, is_scene) for a Fountain scene heading."""
+    if line.startswith(".") and not line.startswith(".."):
+        return line[1:].strip(), True
+    upper = line.upper()
+    if upper.startswith(_SCENE_PREFIXES):
+        return line, True
+    return line, False
+
+
+def _is_transition(line: str) -> bool:
+    if line.startswith(">"):
+        return not line.rstrip().endswith("<")
+    upper = line.upper()
+    return upper == line and (
+        upper.endswith(_TRANSITION_ENDINGS)
+        or upper in {"FADE OUT.", "FADE IN:", "SMASH CUT TO:"}
+    )
+
+
+def _is_character(line: str) -> bool:
+    stripped = line.lstrip("@").strip()
+    if not stripped or stripped.endswith(":") or stripped.startswith("("):
+        return False
+    letters = [char for char in stripped if char.isalpha()]
+    return bool(letters) and stripped == stripped.upper()
+
+
+def _fountain_flowables(text: str, styles: StyleSheet1) -> list:
+    """Turn Fountain plain text into ReportLab flowables."""
+    flow: list = []
+    lines = [line.rstrip() for line in text.splitlines()]
+    index = 0
+    previous_blank = True
+
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if not stripped:
+            previous_blank = True
+            index += 1
+            continue
+
+        if stripped == "===":
+            flow.append(PageBreak())
+            previous_blank = True
+            index += 1
+            continue
+        if stripped.startswith("[[") and stripped.endswith("]]"):
+            index += 1
+            continue
+        if stripped.startswith("="):
+            index += 1
+            continue
+        if stripped.startswith("#"):
+            title = stripped.lstrip("#").strip()
+            flow.append(Paragraph(_inline(title.upper()), styles["FSection"]))
+            previous_blank = False
+            index += 1
+            continue
+
+        scene, is_scene = _scene_heading(stripped)
+        if is_scene:
+            flow.append(Paragraph(_inline(scene), styles["FScene"]))
+            previous_blank = False
+            index += 1
+            continue
+
+        if stripped.startswith(">") and stripped.endswith("<") and len(stripped) > 2:
+            flow.append(
+                Paragraph(_inline(stripped[1:-1].strip()), styles["FCenter"])
+            )
+            previous_blank = False
+            index += 1
+            continue
+
+        if _is_transition(stripped):
+            text_out = stripped[1:].strip() if stripped.startswith(">") else stripped
+            flow.append(Paragraph(_inline(text_out), styles["FTransition"]))
+            previous_blank = False
+            index += 1
+            continue
+
+        if previous_blank and _is_character(stripped):
+            cue = stripped.lstrip("@").strip()
+            flow.append(Paragraph(_inline(cue), styles["FCharacter"]))
+            index += 1
+            dialogue: list[str] = []
+            while index < len(lines) and lines[index].strip():
+                part = lines[index].strip()
+                if part.startswith("(") and part.endswith(")"):
+                    if dialogue:
+                        flow.append(
+                            Paragraph(
+                                _inline(" ".join(dialogue)), styles["FDialogue"]
+                            )
+                        )
+                        dialogue = []
+                    flow.append(
+                        Paragraph(_inline(part), styles["FParenthetical"])
+                    )
+                elif part.startswith("[[") and part.endswith("]]"):
+                    pass  # inline note
+                else:
+                    dialogue.append(part)
+                index += 1
+            if dialogue:
+                flow.append(
+                    Paragraph(_inline(" ".join(dialogue)), styles["FDialogue"])
+                )
+            previous_blank = True
+            continue
+
+        action: list[str] = []
+        while index < len(lines) and lines[index].strip():
+            part = lines[index].strip()
+            if not (part.startswith("[[") and part.endswith("]]")):
+                action.append(part)
+            index += 1
+        if action:
+            flow.append(Paragraph(_inline(" ".join(action)), styles["FAction"]))
+        previous_blank = True
+
+    return flow
+
+
 class _StoryDoc(BaseDocTemplate):
     def __init__(self, filename: str, **kwargs) -> None:
         super().__init__(
@@ -281,6 +501,16 @@ def render_pdf(project: StoryProject, out: Path | None = None) -> Path:
     story.append(PageBreak())
 
     chapters = project.chapters()
+    if project.is_screenplay:
+        for chapter in chapters:
+            story.extend(_fountain_flowables(chapter.body, styles))
+        if not chapters:
+            story.append(
+                Paragraph("This screenplay has no scenes yet.", styles["FAction"])
+            )
+        doc.build(story)
+        return out
+
     for index, chapter in enumerate(chapters):
         story.append(Paragraph(_inline(chapter.title), styles["H1"]))
         story.append(Spacer(1, 4 * mm))

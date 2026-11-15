@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and script syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Ruff
+        run: ruff check src tests scripts
+      - name: Bash syntax
+        run: bash -n install.sh
+      - name: PowerShell syntax
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'install.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+
+  test:
+    name: Test (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: windows-latest
+            python-version: "3.13"
+          - os: macos-latest
+            python-version: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Test
+        run: pytest -q
+
+  package:
+    name: Build and install
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install build tools
+        run: python -m pip install build twine
+      - name: Build
+        run: python -m build
+      - name: Check metadata
+        run: python -m twine check dist/*
+      - name: Check wheel contents
+        run: |
+          python - <<'PY'
+          import pathlib
+          import sys
+          import zipfile
+
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          with zipfile.ZipFile(wheel) as archive:
+              names = archive.namelist()
+          bad = [name for name in names if not (name.startswith("verso/") or ".dist-info/" in name)]
+          if bad:
+              sys.exit(f"unexpected wheel contents: {bad}")
+          print(f"{wheel.name}: {len(names)} files, only verso/ and dist-info")
+          PY
+      - name: Check sdist contents
+        run: |
+          python - <<'PY'
+          import pathlib
+          import sys
+          import tarfile
+
+          sdist = next(pathlib.Path("dist").glob("*.tar.gz"))
+          with tarfile.open(sdist) as archive:
+              names = archive.getnames()
+          bad = [name for name in names if "/u/" in name or name.endswith("/u")]
+          if bad:
+              sys.exit(f"unexpected sdist contents: {bad}")
+          print(f"{sdist.name}: {len(names)} entries, no local story project")
+          PY
+      - name: Install the wheel in a clean venv
+        run: |
+          python -m venv "$RUNNER_TEMP/verso-check"
+          "$RUNNER_TEMP/verso-check/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/verso-check/bin/pip" install dist/*.whl
+          "$RUNNER_TEMP/verso-check/bin/verso" --version
+          "$RUNNER_TEMP/verso-check/bin/python" -m verso --version
+          "$RUNNER_TEMP/verso-check/bin/python" - <<'PY'
+          import importlib.metadata
+
+          import verso
+
+          installed = importlib.metadata.version("verso-cli")
+          assert installed == verso.__version__, (installed, verso.__version__)
+          print(f"version check OK: {installed}")
+          PY

@@ -1,0 +1,207 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)release, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  verify:
+    name: Verify tag and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Check tag and version
+        id: check
+        run: |
+          python scripts/check_version.py --tag "$TAG"
+          echo "version=$(python scripts/check_version.py --tag "$TAG" --print-version)" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$(python scripts/check_version.py --tag "$TAG" --is-prerelease)" >> "$GITHUB_OUTPUT"
+      - name: Require the tag to be on main
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor HEAD origin/main
+      - name: Lint
+        run: ruff check src tests scripts
+      - name: Test
+        run: pytest -q
+      - name: Require a clean checkout
+        run: test -z "$(git status --porcelain)"
+
+  build:
+    name: Build distributions
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install build tools
+        run: python -m pip install build twine packaging
+      - name: Build
+        run: python -m build
+      - name: Check metadata
+        run: python -m twine check dist/*
+      - name: Stage installer scripts
+        run: cp install.sh install.ps1 dist/
+      - name: Check wheel contents
+        run: |
+          python - <<'PY'
+          import pathlib
+          import sys
+          import zipfile
+
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          with zipfile.ZipFile(wheel) as archive:
+              names = archive.namelist()
+          bad = [name for name in names if not (name.startswith("verso/") or ".dist-info/" in name)]
+          if bad:
+              sys.exit(f"unexpected wheel contents: {bad}")
+          print(f"{wheel.name}: {len(names)} files, only verso/ and dist-info")
+          PY
+      - name: Check sdist contents
+        run: |
+          python - <<'PY'
+          import pathlib
+          import sys
+          import tarfile
+
+          sdist = next(pathlib.Path("dist").glob("*.tar.gz"))
+          with tarfile.open(sdist) as archive:
+              names = archive.getnames()
+          bad = [name for name in names if "/u/" in name or name.endswith("/u")]
+          if bad:
+              sys.exit(f"unexpected sdist contents: {bad}")
+          print(f"{sdist.name}: {len(names)} entries, no local story project")
+          PY
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum verso_cli-*.whl verso_cli-*.tar.gz > SHA256SUMS
+      - name: Verify the built wheel
+        run: |
+          python -m venv "$RUNNER_TEMP/verso-release"
+          "$RUNNER_TEMP/verso-release/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/verso-release/bin/pip" install dist/*.whl
+          version="$("$RUNNER_TEMP/verso-release/bin/python" -c 'import importlib.metadata; print(importlib.metadata.version("verso-cli"))')"
+          cli_version="$("$RUNNER_TEMP/verso-release/bin/verso" --version)"
+          python scripts/check_version.py --tag "$TAG" --dist-version "$version" --cli-version "$cli_version"
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          flags=(--title "Verso $TAG")
+          if [ "$PRERELEASE" = "true" ]; then
+            flags+=(--prerelease --latest=false)
+          else
+            flags+=(--latest)
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" "${flags[@]}"
+          else
+            gh release create "$TAG" "${flags[@]}" --verify-tag --generate-notes dist/*
+          fi
+      - name: Show the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release view "$TAG" --json tagName,isPrerelease,isLatest,assets
+
+  smoke:
+    name: Install smoke test (${{ matrix.os }})
+    needs: publish
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install from the published release (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/verso-smoke"
+          source "$RUNNER_TEMP/verso-smoke/bin/activate"
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/$TAG/install.sh" -o "$RUNNER_TEMP/install.sh"
+          bash "$RUNNER_TEMP/install.sh" --version "$TAG" --installer pip
+          expected="verso $(python -c 'import importlib.metadata; print(importlib.metadata.version("verso-cli"))')"
+          test "$(verso --version)" = "$expected"
+      - name: Install from the published release (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $venv = Join-Path $env:RUNNER_TEMP 'verso-smoke'
+          python -m venv $venv
+          $env:VIRTUAL_ENV = $venv
+          $env:PATH = (Join-Path $venv 'Scripts') + [IO.Path]::PathSeparator + $env:PATH
+          $installer = Join-Path $env:RUNNER_TEMP 'install.ps1'
+          Invoke-WebRequest -Uri "https://github.com/${{ github.repository }}/releases/download/$env:TAG/install.ps1" -OutFile $installer -UseBasicParsing
+          & $installer -Version $env:TAG -Installer pip
+          $installed = python -c "import importlib.metadata; print(importlib.metadata.version('verso-cli'))"
+          if ((& verso --version) -ne "verso $installed") {
+            throw "unexpected verso version: $(& verso --version)"
+          }

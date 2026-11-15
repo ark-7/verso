@@ -1,5 +1,14 @@
-from verso.models import POV, Character, OutlineEntry, StoryMeta
-from verso.prompts import chapter_prompt, outline_prompt, parse_outline, story_bible
+from verso.models import POV, Character, OutlineEntry, StoryMeta, WritingMode
+from verso.prompts import (
+    REVIEWER_SYSTEM,
+    SCREENWRITER_SYSTEM,
+    chapter_prompt,
+    outline_prompt,
+    parse_outline,
+    parse_suggestions,
+    review_prompt,
+    story_bible,
+)
 
 
 def test_parse_outline_variants():
@@ -131,3 +140,96 @@ def test_outline_prompt_requires_the_requested_ending():
 
     assert "must realize the opening" in prompt
     assert "must land the intended ending" in prompt
+
+
+def test_screenplay_mode_switches_the_bible_and_chapter_prompt():
+    meta = StoryMeta(
+        title="The Ferryman",
+        mode=WritingMode.screenplay,
+        outline=[OutlineEntry(title="Cold Open")],
+    )
+
+    bible = story_bible(meta)
+    prompt = chapter_prompt(meta, 1, meta.outline[0], words=300)
+
+    assert "Format: screenplay" in bible
+    assert "Fountain" in prompt
+    assert "scene heading" in prompt
+    assert "2 screenplay page(s)" in prompt
+    assert "Fountain" in SCREENWRITER_SYSTEM
+    assert "Never use Markdown" in SCREENWRITER_SYSTEM
+
+
+def test_outline_prompt_notes_screenplay_sequences():
+    meta = StoryMeta(title="The Ferryman", mode=WritingMode.screenplay)
+
+    prompt = outline_prompt(meta, 4)
+
+    assert "sequence of 2–4 scenes" in prompt
+
+
+def test_chapter_prompt_links_to_the_previous_chapter():
+    meta = StoryMeta(title="The Ferryman")
+    prompt = chapter_prompt(
+        meta,
+        2,
+        OutlineEntry(title="The Shore"),
+        previous_tail="Mara rowed into the dark.",
+        previous_number=1,
+        previous_title="The Storm",
+        previous_summary="A crossing goes wrong.",
+    )
+
+    assert "Chapter 1 was: The Storm — A crossing goes wrong." in prompt
+    assert "Mara rowed into the dark." in prompt
+    assert "direct continuity" in prompt
+    assert "do not recap" in prompt
+
+
+def test_story_bible_includes_only_author_approved_suggestions():
+    meta = StoryMeta(
+        title="The Ferryman",
+        accepted_suggestions=["Give Mara a physical tell.", "Let the river answer once."],
+    )
+
+    bible = story_bible(meta)
+
+    assert "Author-approved suggestions" in bible
+    assert "Give Mara a physical tell." in bible
+    assert "Let the river answer once." in bible
+
+
+def test_review_prompt_keeps_the_author_primary():
+    meta = StoryMeta(
+        title="The Ferryman",
+        logline="A ferryman discovers the river is collecting debts.",
+    )
+
+    prompt = review_prompt(meta, "Mara burns the ledger instead of delivering it.")
+
+    assert "Mara burns the ledger instead of delivering it." in prompt
+    assert "author's idea is primary" in prompt.lower()
+    assert "What works" in prompt
+    assert "author's idea is primary" in REVIEWER_SYSTEM.lower()
+    assert "optional" in REVIEWER_SYSTEM.lower()
+
+
+def test_parse_suggestions_extracts_numbered_options():
+    text = """What works
+The debt premise is strong.
+
+Questions
+1. Why does Mara stay?
+
+Optional suggestions
+1. Give Mara a physical tell.
+2. Let the river answer once.
+"""
+    assert parse_suggestions(text) == [
+        "Give Mara a physical tell.",
+        "Let the river answer once.",
+    ]
+
+
+def test_parse_suggestions_returns_nothing_without_a_suggestions_section():
+    assert parse_suggestions("What works\n1. Everything.\n") == []

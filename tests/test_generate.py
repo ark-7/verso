@@ -1,6 +1,14 @@
 import pytest
 
-from verso.generate import GenerationError, generate_outline, write_chapter
+from verso.generate import (
+    GenerationError,
+    accept_review_suggestions,
+    chapter_word_target,
+    clear_accepted_suggestions,
+    generate_outline,
+    review_idea,
+    write_chapter,
+)
 from verso.models import OutlineEntry
 from verso.providers.base import GenerationRequest, Provider, ProviderError
 from verso.store import StoryProject
@@ -95,6 +103,22 @@ def test_write_chapter_refuses_to_overwrite(tmp_path):
     assert project.chapter(1).body == "Second."
 
 
+def test_write_chapter_in_screenplay_mode_uses_fountain(tmp_path):
+    project = StoryProject.create(
+        tmp_path / "script", title="The Ferryman", mode="screenplay"
+    )
+    project.meta.outline = [OutlineEntry(title="Cold Open")]
+    project.save_meta()
+    provider = FakeProvider(["INT. FERRY - NIGHT\n\nMARA\nI owe nothing."])
+
+    chapter = write_chapter(project, provider, 1, words=100)
+
+    assert chapter.path.name == "001-cold-open.fountain"
+    assert "Fountain" in provider.requests[0].system
+    assert "scene heading" in provider.requests[0].prompt.lower()
+    assert "screenplay page" in provider.requests[0].prompt.lower()
+
+
 def test_write_chapter_includes_previous_tail(tmp_path):
     project = _project(tmp_path)
     write_chapter(project, FakeProvider(["Mara rowed into the dark."]), 1, words=100)
@@ -173,3 +197,111 @@ def test_write_chapter_with_empty_output_fails(tmp_path):
     with pytest.raises(GenerationError, match="no text"):
         write_chapter(project, FakeProvider([]), 1)
     assert list(project.chapters_dir.glob("*.md")) == []
+
+
+def test_chapter_word_target_precedence(tmp_path):
+    project = _project(tmp_path)
+    project.meta.words_per_chapter = 1200
+
+    assert chapter_word_target(project, 1, fallback=900) == 1200
+
+    project.meta.outline[0].words = 700
+    assert chapter_word_target(project, 1, fallback=900) == 700
+    assert chapter_word_target(project, 1, explicit=500, fallback=900) == 500
+
+    project.meta.outline[0].words = None
+    project.meta.words_per_chapter = None
+    assert chapter_word_target(project, 1, fallback=900) == 900
+
+
+def test_write_chapter_can_disable_continuity(tmp_path):
+    project = _project(tmp_path)
+    write_chapter(project, FakeProvider(["Mara rowed into the dark."]), 1, words=100)
+    provider = FakeProvider(["Dawn came."])
+
+    write_chapter(project, provider, 2, words=100, continuity=False)
+
+    assert "Mara rowed into the dark." not in provider.requests[0].prompt
+    assert "direct continuity" not in provider.requests[0].prompt
+
+
+def test_review_idea_stores_advice_without_applying_it(tmp_path):
+    project = _project(tmp_path)
+    provider = FakeProvider(
+        [
+            "What works\nThe debt premise is strong.\n\n",
+            "Questions\n\n1. Why does Mara stay?\n\n",
+            "Optional suggestions\n\n1. Give Mara a physical tell.\n",
+        ]
+    )
+
+    review = review_idea(project, provider, premise="A ferryman owes a debt.")
+
+    assert review.text.startswith("What works")
+    assert review.suggestions == ["Give Mara a physical tell."]
+    assert project.meta.accepted_suggestions == []
+    assert "A ferryman owes a debt." in provider.requests[0].prompt
+    reloaded = StoryProject.load(project.root)
+    assert reloaded.meta.idea_review.suggestions == [
+        "Give Mara a physical tell."
+    ]
+
+
+def test_accept_review_suggestions_requires_an_explicit_choice(tmp_path):
+    project = _project(tmp_path)
+    provider = FakeProvider(
+        [
+            "What works\nStrong.\n\nQuestions\n\n1. Why now?\n\n",
+            (
+                "Optional suggestions\n\n1. Give Mara a tell.\n"
+                "2. Let the river answer.\n"
+            ),
+        ]
+    )
+    review_idea(project, provider)
+
+    accepted = accept_review_suggestions(project, [2])
+
+    assert accepted == ["Let the river answer."]
+    assert project.meta.accepted_suggestions == ["Let the river answer."]
+    assert "Give Mara a tell." not in project.meta.accepted_suggestions
+    reloaded = StoryProject.load(project.root)
+    assert reloaded.meta.accepted_suggestions == ["Let the river answer."]
+
+
+def test_accept_review_suggestions_can_include_author_wording(tmp_path):
+    project = _project(tmp_path)
+    review_idea(
+        project,
+        FakeProvider(["Optional suggestions\n\n1. Give Mara a tell.\n"]),
+    )
+
+    accepted = accept_review_suggestions(
+        project, [], enhancement="Mara hums when she is afraid."
+    )
+
+    assert accepted == ["Mara hums when she is afraid."]
+    assert project.meta.accepted_suggestions == ["Mara hums when she is afraid."]
+
+
+def test_clear_accepted_suggestions_restores_the_authors_original_bible(tmp_path):
+    project = _project(tmp_path)
+    project.meta.accepted_suggestions = ["Give Mara a tell."]
+    project.save_meta()
+
+    removed = clear_accepted_suggestions(project)
+
+    assert removed == 1
+    assert project.meta.accepted_suggestions == []
+    assert StoryProject.load(project.root).meta.accepted_suggestions == []
+
+
+def test_accept_review_suggestions_rejects_unknown_numbers(tmp_path):
+    project = _project(tmp_path)
+    review_idea(
+        project,
+        FakeProvider(["Optional suggestions\n\n1. Give Mara a tell.\n"]),
+    )
+
+    with pytest.raises(GenerationError, match="does not exist"):
+        accept_review_suggestions(project, [4])

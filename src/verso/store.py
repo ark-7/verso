@@ -14,11 +14,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .models import StoryMeta
+from .models import StoryMeta, WritingMode
 
 META_FILE = "story.json"
 CHAPTERS_DIR = "chapters"
 EXPORTS_DIR = "exports"
+CHAPTER_SUFFIXES = (".md", ".fountain")
 
 
 class StoryError(Exception):
@@ -103,13 +104,22 @@ class StoryProject:
         author: str = "",
         genre: str = "",
         premise: str = "",
+        mode: WritingMode | str = WritingMode.prose,
     ) -> StoryProject:
         root = Path(root)
         if (root / META_FILE).exists():
             raise StoryError(f"A story already exists at {root}.")
         (root / CHAPTERS_DIR).mkdir(parents=True, exist_ok=True)
         (root / EXPORTS_DIR).mkdir(parents=True, exist_ok=True)
-        meta = StoryMeta(title=title, author=author, genre=genre, logline=premise)
+        mode = WritingMode(mode)
+        meta = StoryMeta(
+            title=title,
+            author=author,
+            genre=genre,
+            logline=premise,
+            mode=mode,
+            export_format="fountain" if mode == WritingMode.screenplay else "md",
+        )
         project = cls(root, meta)
         project.save_meta()
         return project
@@ -241,10 +251,26 @@ class StoryProject:
     def exports_dir(self) -> Path:
         return self.root / EXPORTS_DIR
 
+    @property
+    def chapter_suffix(self) -> str:
+        """The canonical extension for new chapters in this story's mode."""
+        return (
+            ".fountain"
+            if self.meta.mode == WritingMode.screenplay
+            else ".md"
+        )
+
+    @property
+    def is_screenplay(self) -> bool:
+        return self.meta.mode == WritingMode.screenplay
+
     def chapter_paths(self) -> list[Path]:
         if not self.chapters_dir.is_dir():
             return []
-        return sorted(self.chapters_dir.glob("*.md"))
+        paths: list[Path] = []
+        for suffix in CHAPTER_SUFFIXES:
+            paths.extend(self.chapters_dir.glob(f"*{suffix}"))
+        return sorted(paths)
 
     def chapters(self) -> list[Chapter]:
         chapters = []
@@ -266,7 +292,7 @@ class StoryProject:
         return chapters[number - 1]
 
     def chapter_path_for(self, number: int, title: str) -> Path:
-        return self.chapters_dir / f"{number:03d}-{slugify(title)}.md"
+        return self.chapters_dir / f"{number:03d}-{slugify(title)}{self.chapter_suffix}"
 
     def add_chapter(self, number: int, title: str, body: str = "") -> Chapter:
         path = self.chapter_path_for(number, title)

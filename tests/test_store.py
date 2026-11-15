@@ -54,6 +54,31 @@ def test_chapter_roundtrip(tmp_path):
     assert chapter.path.name == "001-the-storm.md"
 
 
+def test_screenplay_chapters_are_stored_as_fountain(tmp_path):
+    project = StoryProject.create(
+        tmp_path / "script", title="The Ferryman", mode="screenplay"
+    )
+    project.add_chapter(1, "Cold Open", "INT. FERRY - NIGHT\n\nMARA\nI owe nothing.")
+
+    assert project.meta.mode.value == "screenplay"
+    assert project.meta.export_format == "fountain"
+    assert project.chapter_suffix == ".fountain"
+    assert project.is_screenplay is True
+    assert project.chapter(1).path.name == "001-cold-open.fountain"
+
+
+def test_chapter_reader_sees_both_markdown_and_fountain(tmp_path):
+    project = StoryProject.create(tmp_path / "story", title="T")
+    project.add_chapter(1, "One", "Markdown prose.")
+    project.meta.mode = "screenplay"
+    project.add_chapter(2, "Two", "INT. ROOM - DAY\n\nAction.")
+
+    assert [chapter.path.suffix for chapter in project.chapters()] == [
+        ".md",
+        ".fountain",
+    ]
+
+
 def test_next_chapter_number_handles_gaps(tmp_path):
     project = StoryProject.create(tmp_path / "story", title="T")
     project.add_chapter(1, "One", "a")

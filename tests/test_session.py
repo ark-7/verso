@@ -40,7 +40,10 @@ def test_edit_preferences_saves_every_answer(tmp_path, monkeypatch):
             "She pays the debt with her own name.",
             "The Odyssey, Dune",
             "The river remembers every debt.",
+            "1800",
+            "y",
             "8",
+            "prose",
             "pdf",
         ],
     )
@@ -59,7 +62,10 @@ def test_edit_preferences_saves_every_answer(tmp_path, monkeypatch):
     assert meta.ending == "She pays the debt with her own name."
     assert meta.references == ["The Odyssey", "Dune"]
     assert meta.notes == "The river remembers every debt."
+    assert meta.words_per_chapter == 1800
+    assert meta.continuity is True
     assert meta.target_chapters == 8
+    assert meta.mode.value == "prose"
     assert meta.export_format == "pdf"
 
 
@@ -111,7 +117,10 @@ def test_setup_wizard_saves_preferences_and_generates_an_outline(
             "She pays with her name.",
             "The Odyssey",
             "Keep the river ambiguous.",
+            "1800",
+            "y",
             "2",
+            "prose",
             "md",
             "0",  # leave the character manager
         ],
@@ -132,6 +141,56 @@ def test_setup_wizard_saves_preferences_and_generates_an_outline(
         "The Storm",
         "The Shore",
     ]
+
+
+def test_set_chapter_words_updates_only_that_chapter(tmp_path, monkeypatch):
+    project = StoryProject.create(tmp_path / "story", title="The Ferryman")
+    project.meta.outline = [
+        OutlineEntry(title="The Storm"),
+        OutlineEntry(title="The Shore"),
+    ]
+    project.save_meta()
+    _prompt_sequence(monkeypatch, ["2", "900"])
+
+    session._set_chapter_words(project)
+
+    reloaded = StoryProject.load(project.root)
+    assert reloaded.meta.outline[1].words == 900
+    assert reloaded.meta.outline[0].words is None
+
+
+def test_review_story_idea_only_applies_accepted_suggestions(
+    tmp_path, monkeypatch
+):
+    project = StoryProject.create(tmp_path / "story", title="The Ferryman")
+    project.meta.logline = "A ferryman discovers a debt she never owed."
+    project.save_meta()
+    _prompt_sequence(monkeypatch, ["1"])
+    provider = FakeProvider(
+        [
+            "What works\nStrong premise.\n\nQuestions\n\n1. Why now?\n\n",
+            "Optional suggestions\n\n1. Give Mara a tell.\n",
+        ]
+    )
+
+    session._review_story_idea(project, provider)
+
+    reloaded = StoryProject.load(project.root)
+    assert reloaded.meta.idea_review.suggestions == ["Give Mara a tell."]
+    assert reloaded.meta.accepted_suggestions == ["Give Mara a tell."]
+
+
+def test_review_story_idea_can_be_left_unchanged(tmp_path, monkeypatch):
+    project = StoryProject.create(tmp_path / "story", title="The Ferryman")
+    project.save_meta()
+    _prompt_sequence(monkeypatch, [""])
+    provider = FakeProvider(
+        ["Optional suggestions\n\n1. Give Mara a tell.\n"]
+    )
+
+    session._review_story_idea(project, provider)
+
+    assert StoryProject.load(project.root).meta.accepted_suggestions == []
 
 
 def test_character_manager_adds_a_character(tmp_path, monkeypatch):

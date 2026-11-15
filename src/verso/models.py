@@ -29,6 +29,19 @@ POV_LABELS: dict[POV, str] = {
 }
 
 
+class WritingMode(StrEnum):
+    """How chapter documents are written and stored."""
+
+    prose = "prose"
+    screenplay = "screenplay"
+
+
+MODE_LABELS: dict[WritingMode, str] = {
+    WritingMode.prose: "Prose",
+    WritingMode.screenplay: "Screenplay (Fountain)",
+}
+
+
 class Character(BaseModel):
     name: str
     role: str = ""
@@ -43,6 +56,21 @@ class OutlineEntry(BaseModel):
     # User-supplied guidance for this chapter. It takes precedence over the
     # generated beat when the chapter is written.
     direction: str = ""
+    # Per-chapter length override. When unset, the story default and then the
+    # global config value apply.
+    words: int | None = None
+
+
+class IdeaReview(BaseModel):
+    """Editor feedback on the author's idea.
+
+    The review is advisory only. ``suggestions`` is parsed so the author can
+    explicitly accept individual items; nothing is applied automatically.
+    """
+
+    text: str = ""
+    suggestions: list[str] = Field(default_factory=list)
+    reviewed_at: datetime | None = None
 
 
 class StoryMeta(BaseModel):
@@ -50,10 +78,18 @@ class StoryMeta(BaseModel):
     author: str = ""
     genre: str = ""
     tone: str = ""
+    # Prose stories keep Markdown chapters; screenplay stories keep Fountain
+    # chapters. The mode also selects the writer prompt and the export default.
+    mode: WritingMode = WritingMode.prose
     logline: str = ""
     pov: POV = POV.third_limited
     tense: str = "past"
     target_words: int | None = None
+    # Story-level chapter length. Individual outline entries can override it.
+    words_per_chapter: int | None = None
+    # When true, each chapter prompt includes the previous chapter's ending and
+    # asks the model to carry time, place, characters, and threads forward.
+    continuity: bool = True
     # Preferences gathered by the interactive session. They are part of the
     # story bible so every later generation call sees them.
     opening: str = ""
@@ -62,6 +98,10 @@ class StoryMeta(BaseModel):
     notes: str = ""
     target_chapters: int | None = None
     export_format: str = "md"
+    # Editor feedback is stored, but only author-approved suggestions enter the
+    # story bible.
+    idea_review: IdeaReview = Field(default_factory=IdeaReview)
+    accepted_suggestions: list[str] = Field(default_factory=list)
     characters: list[Character] = Field(default_factory=list)
     outline: list[OutlineEntry] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=_utcnow)

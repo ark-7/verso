@@ -1,8 +1,9 @@
 import asyncio
+from datetime import UTC, datetime
 
 from verso import tui
 from verso.config import Config
-from verso.models import OutlineEntry
+from verso.models import IdeaReview, OutlineEntry
 from verso.providers.base import GenerationRequest, Provider
 from verso.store import StoryProject
 from verso.tui import VersoApp
@@ -105,6 +106,103 @@ def test_tui_plain_text_without_a_plan_saves_story_notes(tmp_path):
     asyncio.run(scenario())
 
     assert project.meta.notes == "The river remembers every debt."
+
+
+def test_tui_switches_to_screenplay_mode(tmp_path):
+    project = _project(tmp_path)
+
+    async def scenario():
+        app = VersoApp(project, FakeProvider())
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            assert "PROSE" in str(app._topbar_text())
+            app._handle_command("/mode screenplay")
+            await pilot.pause()
+            assert "SCREENPLAY" in str(app._topbar_text())
+
+    asyncio.run(scenario())
+
+    assert project.meta.mode.value == "screenplay"
+    assert project.meta.export_format == "fountain"
+    assert project.chapter_suffix == ".fountain"
+
+
+def test_tui_tab_completes_commands(tmp_path):
+    project = _project(tmp_path)
+
+    async def scenario():
+        app = VersoApp(project, FakeProvider())
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            command = app.query_one("#command")
+            command.value = "/wri"
+            await pilot.pause()
+            await pilot.press("tab")
+            await pilot.pause()
+            assert command.value == "/write "
+
+    asyncio.run(scenario())
+
+
+def test_tui_words_command_sets_story_and_chapter_targets(tmp_path):
+    project = _project(tmp_path)
+
+    async def scenario():
+        app = VersoApp(project, FakeProvider())
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app._handle_command("/words 900")
+            await pilot.pause()
+            assert project.meta.words_per_chapter == 900
+            app._handle_command("/words 1 600")
+            await pilot.pause()
+            assert project.meta.outline[0].words == 600
+
+    asyncio.run(scenario())
+
+    reloaded = StoryProject.load(project.root)
+    assert reloaded.meta.words_per_chapter == 900
+    assert reloaded.meta.outline[0].words == 600
+
+
+def test_tui_continuity_command_toggles_linking(tmp_path):
+    project = _project(tmp_path)
+
+    async def scenario():
+        app = VersoApp(project, FakeProvider())
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app._handle_command("/continuity off")
+            await pilot.pause()
+            assert project.meta.continuity is False
+
+    asyncio.run(scenario())
+
+    assert StoryProject.load(project.root).meta.continuity is False
+
+
+def test_tui_accept_command_requires_explicit_choice(tmp_path):
+    project = _project(tmp_path)
+    project.meta.idea_review = IdeaReview(
+        text="What works\nStrong premise.",
+        suggestions=["Give Mara a tell.", "Let the river answer."],
+        reviewed_at=datetime.now(UTC),
+    )
+    project.save_meta()
+
+    async def scenario():
+        app = VersoApp(project, FakeProvider())
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            assert project.meta.accepted_suggestions == []
+            app._handle_command("/accept 2")
+            await pilot.pause()
+
+    asyncio.run(scenario())
+
+    assert StoryProject.load(project.root).meta.accepted_suggestions == [
+        "Let the river answer."
+    ]
 
 
 def test_tui_character_and_plan_editing_prompts_are_sequential(tmp_path):

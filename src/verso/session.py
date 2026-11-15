@@ -11,24 +11,35 @@ session does not lose completed work.
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 
 import typer
 from rich.console import Console
 from rich.markup import escape
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from .config import load_config
+from .export.fountain import write_fountain
 from .export.markdown import write_markdown
 from .export.pdf import render_pdf
-from .generate import GenerationError, generate_outline, write_chapter
-from .models import POV, Character, OutlineEntry
+from .generate import (
+    GenerationError,
+    accept_review_suggestions,
+    chapter_word_target,
+    generate_outline,
+    review_idea,
+    write_chapter,
+)
+from .models import MODE_LABELS, POV, Character, IdeaReview, OutlineEntry, WritingMode
 from .providers.base import Provider, ProviderError
 from .store import StoryError, StoryProject
 
 console = Console()
 
-_FORMATS = ("md", "pdf")
+_MODE_KEYS = ("prose", "screenplay")
 _TENSES = ("past", "present")
 _POV_KEYS: dict[str, POV] = {
     "1": POV.first,
@@ -86,8 +97,51 @@ def _prompt_choice(label: str, choices: tuple[str, ...], default: str) -> str:
         console.print(f"[red]Choose one of: {', '.join(choices)}.[/red]")
 
 
+def _prompt_bool(label: str, default: bool) -> bool:
+    default_text = "y" if default else "n"
+    while True:
+        raw = _prompt_text(f"{label} (y/n)", default_text).lower()
+        if raw in {"y", "yes"}:
+            return True
+        if raw in {"n", "no"}:
+            return False
+        console.print("[red]Answer y or n.[/red]")
+
+
+def _prompt_word_target(current: int | None) -> int | None:
+    """Prompt for a per-chapter target; a lone dash clears the override."""
+    while True:
+        raw = _prompt_text(
+            "Word target for this chapter ('-' for the story default)",
+            str(current) if current else "",
+        )
+        if raw == "-":
+            return None
+        if not raw:
+            return current
+        try:
+            value = int(raw)
+        except ValueError:
+            console.print("[red]Word target must be a whole number.[/red]")
+            continue
+        if value < 100:
+            console.print("[red]Word target must be at least 100.[/red]")
+            continue
+        return value
+
+
 def _chapter_goal(project: StoryProject) -> int:
     return project.meta.target_chapters or len(project.meta.outline) or 10
+
+
+def _chapter_words(project: StoryProject, number: int) -> int:
+    return chapter_word_target(
+        project, number, fallback=load_config().words_per_chapter
+    )
+
+
+def _formats(project: StoryProject) -> tuple[str, ...]:
+    return ("fountain", "pdf") if project.is_screenplay else ("md", "pdf")
 
 
 def _prompt_pov(default: POV) -> POV:
@@ -118,6 +172,7 @@ def _show_preferences(project: StoryProject) -> None:
         ("Author", meta.author),
         ("Genre", meta.genre),
         ("Tone", meta.tone),
+        ("Writing mode", MODE_LABELS[meta.mode]),
         ("Point of view", meta.pov.value.replace("-", " ").capitalize()),
         ("Tense", meta.tense),
         ("Logline", meta.logline),
@@ -128,6 +183,20 @@ def _show_preferences(project: StoryProject) -> None:
         (
             "Chapters",
             str(meta.target_chapters or len(meta.outline) or 10),
+        ),
+        (
+            "Words per chapter",
+            f"{meta.words_per_chapter:,}" if meta.words_per_chapter else "from config",
+        ),
+        ("Chapter continuity", "on" if meta.continuity else "off"),
+        (
+            "Idea review",
+            (
+                f"{len(meta.idea_review.suggestions)} suggestion(s), "
+                f"{len(meta.accepted_suggestions)} accepted"
+                if meta.idea_review.reviewed_at
+                else "not reviewed"
+            ),
         ),
         ("Export format", meta.export_format),
     ]
@@ -171,6 +240,7 @@ def _show_outline(project: StoryProject) -> None:
     table.add_column("Chapter", style="bold", overflow="fold")
     table.add_column("Beat", style="dim", overflow="fold")
     table.add_column("Your direction", overflow="fold")
+    table.add_column("Target", justify="right")
     table.add_column("Status", justify="right")
     for number, entry in enumerate(meta.outline, start=1):
         chapter = written.get(number)
@@ -179,11 +249,15 @@ def _show_outline(project: StoryProject) -> None:
             if chapter
             else "[dim]not written[/dim]"
         )
+        target = f"{_chapter_words(project, number):,}"
+        if entry.words:
+            target = f"[bold]{target}[/bold]"
         table.add_row(
             str(number),
             escape(entry.title),
             escape(entry.summary) or "[dim]-[/dim]",
             escape(entry.direction) or "[dim]-[/dim]",
+            target,
             status,
         )
     console.print(table)
@@ -317,14 +391,32 @@ def _edit_preferences(project: StoryProject) -> None:
             part.strip() for part in references.split(",") if part.strip()
         ]
         meta.notes = _prompt_optional("Story ideas or notes", meta.notes)
+        words_default = (
+            meta.words_per_chapter or load_config().words_per_chapter
+        )
+        meta.words_per_chapter = _prompt_int(
+            "Words per chapter",
+            words_default,
+            minimum=100,
+            maximum=20000,
+        )
+        meta.continuity = _prompt_bool(
+            "Keep each chapter continuous with the previous one?",
+            meta.continuity,
+        )
         meta.target_chapters = _prompt_int(
             "Number of chapters", _chapter_goal(project), minimum=1, maximum=100
         )
+        mode = _prompt_choice(
+            "Writing mode", _MODE_KEYS, meta.mode.value
+        )
+        meta.mode = WritingMode(mode)
+        formats = _formats(project)
         format_default = (
-            meta.export_format if meta.export_format in _FORMATS else "md"
+            meta.export_format if meta.export_format in formats else formats[0]
         )
         meta.export_format = _prompt_choice(
-            "Export format", _FORMATS, format_default
+            "Export format", formats, format_default
         )
     finally:
         # Ctrl-C in the middle of the wizard should still keep what was entered.
@@ -390,7 +482,7 @@ def _write_chapter_interactive(
     force: bool = False,
 ) -> None:
     entry = project.meta.outline[number - 1]
-    target = load_config().words_per_chapter
+    target = _chapter_words(project, number)
     target_path = project.chapter_path_for(number, entry.title)
     if force:
         # A renamed chapter would otherwise leave two files with the same number.
@@ -498,23 +590,106 @@ def _edit_outline(project: StoryProject) -> None:
         entry.title = _prompt_text("Title", entry.title) or entry.title
         entry.summary = _prompt_optional("Beat summary", entry.summary)
         entry.direction = _prompt_optional("Your direction", entry.direction)
+        entry.words = _prompt_word_target(entry.words)
     finally:
         project.save_meta()
     console.print("[green]Saved[/green] chapter plan.")
     _show_outline(project)
 
 
+def _set_chapter_words(project: StoryProject) -> None:
+    number = _prompt_chapter_number(project)
+    entry = project.meta.outline[number - 1]
+    console.print(
+        f"\n[bold]Chapter {number}: {escape(entry.title)}[/bold] — "
+        f"currently ~{_chapter_words(project, number):,} words"
+    )
+    entry.words = _prompt_word_target(entry.words)
+    project.save_meta()
+    console.print(
+        f"[green]Saved[/green] chapter {number} now targets "
+        f"~{_chapter_words(project, number):,} words."
+    )
+
+
+# -------------------------------------------------------------------- review
+def _show_review(review: IdeaReview) -> None:
+    console.print(
+        Panel(
+            Text(review.text),
+            title="Idea review — your idea is primary",
+            border_style="cyan",
+            padding=(0, 1),
+        )
+    )
+    if not review.suggestions:
+        console.print(
+            "[dim]No optional suggestions. Your idea stands as written.[/dim]"
+        )
+        return
+    table = Table(box=None, pad_edge=False)
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Optional suggestion", overflow="fold")
+    for number, suggestion in enumerate(review.suggestions, start=1):
+        table.add_row(str(number), escape(suggestion))
+    console.print(table)
+
+
+def _parse_review_choice(answer: str, count: int) -> tuple[list[int], str]:
+    """Split an accept prompt into suggestion indexes and author wording."""
+    text = answer.strip()
+    if not text:
+        return [], ""
+    if text.lower() in {"all", "*"}:
+        return list(range(1, count + 1)), ""
+    parts = [part for part in re.split(r"[,\s]+", text) if part]
+    if parts and all(part.isdigit() for part in parts):
+        return [int(part) for part in parts], ""
+    return [], text
+
+
+def _review_story_idea(project: StoryProject, llm: Provider) -> None:
+    premise = project.meta.logline or project.meta.notes
+    with console.status("Reviewing your idea...", spinner="dots"):
+        review = review_idea(project, llm, premise=premise)
+    _show_review(review)
+    if not review.suggestions:
+        return
+    answer = _prompt_text(
+        "Accept suggestions (e.g. 1,3 or 'all'; type your own wording to "
+        "enhance; Enter keeps your idea unchanged)",
+        "",
+    )
+    indexes, enhancement = _parse_review_choice(answer, len(review.suggestions))
+    accepted = accept_review_suggestions(
+        project, indexes, enhancement=enhancement
+    )
+    if accepted:
+        console.print(
+            f"[green]Accepted[/green] {len(accepted)} item(s). "
+            "They now guide later generations; the original idea is unchanged."
+        )
+    else:
+        console.print("[dim]Your idea is unchanged.[/dim]")
+
+
 # ----------------------------------------------------------------------- export
 def _export(project: StoryProject) -> None:
+    formats = _formats(project)
     default = (
         project.meta.export_format
-        if project.meta.export_format in _FORMATS
-        else "md"
+        if project.meta.export_format in formats
+        else formats[0]
     )
-    fmt = _prompt_choice("Export format", _FORMATS, default)
+    fmt = _prompt_choice("Export format", formats, default)
     project.meta.export_format = fmt
     project.save_meta()
-    path = render_pdf(project) if fmt == "pdf" else write_markdown(project)
+    if fmt == "pdf":
+        path = render_pdf(project)
+    elif fmt == "fountain":
+        path = write_fountain(project)
+    else:
+        path = write_markdown(project)
     console.print(
         f"[green]Exported[/green] {escape(str(path))} "
         f"({path.stat().st_size:,} bytes)"
@@ -529,6 +704,21 @@ def _setup_story(project: StoryProject, llm: Provider) -> None:
     )
     _edit_preferences(project)
     _manage_characters(project)
+
+    if typer.confirm(
+        "Review your story idea before planning? Your idea stays primary.",
+        default=True,
+    ):
+        try:
+            _review_story_idea(project, llm)
+        except (GenerationError, ProviderError) as exc:
+            console.print(
+                f"[red]Could not review the idea:[/red] {escape(str(exc))}"
+            )
+            console.print(
+                "[dim]Your idea and preferences are saved. You can retry with "
+                "menu option 10.[/dim]"
+            )
 
     chapters = _chapter_goal(project)
     if not project.meta.outline:
@@ -578,6 +768,8 @@ _MENU = """
   7. Regenerate the chapter plan
   8. Export the story
   9. Show progress
+ 10. Review your story idea (advice only)
+ 11. Set a chapter's word target
   q. End the session
 """
 
@@ -615,11 +807,12 @@ def run_session(
 
     if not tui:
         console.print(
-            f"\n[bold]Verso interactive session[/bold] — "
+            f"\n[bold]Verso interactive session[/bold] · "
             f"{escape(project.meta.title)}"
         )
         console.print(
             f"[dim]{escape(str(project.root))} · "
+            f"{MODE_LABELS[project.meta.mode]} · "
             f"{escape(llm.name)}/{escape(llm.model)}[/dim]"
         )
 
@@ -670,8 +863,12 @@ def run_session(
                 _export(project)
             elif choice == "9":
                 _show_progress(project)
+            elif choice == "10":
+                _review_story_idea(project, llm)
+            elif choice == "11":
+                _set_chapter_words(project)
             else:
-                console.print("[red]Choose 1–9 or q.[/red]")
+                console.print("[red]Choose 1–11 or q.[/red]")
         except (GenerationError, ProviderError, StoryError) as exc:
             console.print(f"[red]Error:[/red] {escape(str(exc))}")
         except KeyboardInterrupt:

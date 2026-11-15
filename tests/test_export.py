@@ -1,3 +1,4 @@
+from verso.export.fountain import render_fountain, write_fountain
 from verso.export.markdown import render_markdown
 from verso.export.pdf import render_pdf
 from verso.store import StoryProject
@@ -38,6 +39,52 @@ def test_markdown_frontmatter(tmp_path):
 
 def test_pdf_export(tmp_path):
     project = _make_project(tmp_path)
+    out = render_pdf(project)
+
+    assert out.is_file()
+    assert out.read_bytes().startswith(b"%PDF")
+    assert out.stat().st_size > 1500
+
+
+def _make_screenplay(tmp_path):
+    project = StoryProject.create(
+        tmp_path / "script",
+        title="The Ferryman",
+        author="A. Author",
+        premise="A river, a debt.",
+        mode="screenplay",
+    )
+    project.add_chapter(
+        1,
+        "Cold Open",
+        (
+            "INT. FERRY - NIGHT\n\n"
+            "Rain hammers the deck. MARA poles the boat toward the far bank.\n\n"
+            "MARA\n"
+            "I never owed you anything.\n\n"
+            "CUT TO:\n"
+        ),
+    )
+    return project
+
+
+def test_fountain_export(tmp_path):
+    project = _make_screenplay(tmp_path)
+    text = render_fountain(project)
+
+    assert text.startswith("Title: The Ferryman\n")
+    assert "Author: A. Author" in text
+    assert "Draft date:" in text
+    assert "# Chapter 1: Cold Open" in text
+    assert "INT. FERRY - NIGHT" in text
+
+    path = write_fountain(project)
+    assert path.name == "the-ferryman.fountain"
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_screenplay_pdf_export(tmp_path):
+    project = _make_screenplay(tmp_path)
     out = render_pdf(project)
 
     assert out.is_file()

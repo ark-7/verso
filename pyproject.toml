@@ -1,18 +1,31 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 # PyPI distribution name. The import package (`verso`) and the console
 # command (`verso`) are intentionally unchanged.
 name = "verso-cli"
-version = "0.1.0"
-description = "A terminal co-writer for long-form stories, with Markdown and PDF export."
+dynamic = ["version"]
+description = "A terminal co-writer for long-form stories and screenplays, with Markdown, Fountain, and PDF export."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "GNU General Public License v3.0" }
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
 authors = [{ name = "Aadhitya A" }]
-keywords = ["cli", "writing", "fiction", "llm", "markdown", "pdf", "co-writing", "AI", "novel assistant", "storywriter", "tool"]
+keywords = ["cli", "writing", "fiction", "llm", "markdown", "pdf", "fountain", "screenplay", "co-writing", "AI", "novel assistant", "storywriter", "tool"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Text Processing :: Markup",
+]
 dependencies = [
     "typer>=0.12.3",
     "rich>=13.7.0",
@@ -26,13 +39,25 @@ dependencies = [
 anthropic = ["anthropic>=0.40.0"]
 openai = ["openai>=1.30.0"]
 all = ["anthropic>=0.40.0", "openai>=1.30.0"]
-dev = ["pytest>=8.0", "ruff>=0.5"]
+dev = ["pytest>=8.0", "ruff>=0.17.0", "packaging>=24.0"]
+
+[project.urls]
+Homepage = "https://github.com/ark-7/verso"
+Repository = "https://github.com/ark-7/verso"
+Issues = "https://github.com/ark-7/verso/issues"
+Changelog = "https://github.com/ark-7/verso/releases"
 
 [project.scripts]
 verso = "verso.cli:app"
 
+[tool.hatch.version]
+path = "src/verso/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/verso"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/verso", "tests", "README.md", "LICENSE", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
