@@ -164,7 +164,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release view "$TAG" --json tagName,isPrerelease,isLatest,assets
+        run: gh release view "$TAG" --json tagName,isPrerelease,assets
 
   smoke:
     name: Install smoke test (${{ matrix.os }})
