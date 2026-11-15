@@ -45,7 +45,7 @@ dev = ["pytest>=8.0", "ruff>=0.17.0", "packaging>=24.0"]
 Homepage = "https://github.com/ark-7/verso"
 Repository = "https://github.com/ark-7/verso"
 Issues = "https://github.com/ark-7/verso/issues"
-Changelog = "https://github.com/ark-7/verso/releases"
+Changelog = "https://github.com/ark-7/verso/blob/main/CHANGELOG.md"
 
 [project.scripts]
 verso = "verso.cli:app"
@@ -57,7 +57,7 @@ path = "src/verso/__init__.py"
 packages = ["src/verso"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/verso", "tests", "README.md", "LICENSE", "pyproject.toml"]
+include = ["src/verso", "tests", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

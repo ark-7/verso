@@ -75,7 +75,9 @@ pip install -e ".[all,dev]"        # or [anthropic] / [openai] only
 ```
 
 Ollama support needs no extra SDK — it talks to the local HTTP API directly.
-Release engineering is documented in [RELEASING.md](RELEASING.md).
+Release notes and [CHANGELOG.md](CHANGELOG.md) are generated from commit
+messages; use Conventional Commits (`feat:`, `fix:`, `docs:`) for readable
+grouping. Release engineering is documented in [RELEASING.md](RELEASING.md).
 
 ## Quick start
 

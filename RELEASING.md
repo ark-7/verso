@@ -18,6 +18,31 @@ reads that line at build time, and `verso --version` reports it at runtime.
 Never move or delete a published tag. If a release is wrong, publish a new
 patch version instead of replacing the bytes under the old one.
 
+## Changelog and release notes
+
+`scripts/changelog.py` turns the commits between the previous tag and the tag
+being released into Markdown. The same text becomes the GitHub Release
+description and, for stable releases, a new `CHANGELOG.md` section, so the two
+never drift.
+
+Write commit subjects as Conventional Commits to get useful grouping:
+`feat:`, `fix:`, `perf:`, `refactor:`, `docs:`, `build:`, `ci:`, `test:`,
+`style:`, `chore:`, and `revert:`. A `!` or a `BREAKING CHANGE:` body line moves
+a commit to **Breaking Changes**; everything else is listed under **Other
+Changes**. Merge commits, `chore(release):` commits, `docs(changelog):`
+commits, and commits that only touch `CHANGELOG.md` are omitted.
+
+The `publish` job generates the notes from `main` and sets them as the release
+description. The `changelog` job then prepends the entry to `CHANGELOG.md` and
+pushes `docs(changelog): update for <tag>` to `main`. Prereleases get release
+notes but no changelog entry, so an RC rehearsal leaves no stale version
+behind. Re-running a release replaces that version's section instead of
+duplicating it.
+
+If `main` is protected, allow `github-actions[bot]` to push (or add a bypass
+for it). Otherwise the changelog job fails after the release has already been
+published; the release itself is unaffected.
+
 ## Artifacts
 
 Each release contains:
@@ -85,12 +110,15 @@ Start from a clean, green `main`.
    git push origin v0.2.0
    ```
 
-5. Watch the `Release` workflow. It runs four jobs:
+5. Watch the `Release` workflow. It runs five jobs:
 
    - **verify**: tag/version match, tag is on `main`, lint, tests, clean tree.
    - **build**: wheel and sdist, `twine check`, content checks, `SHA256SUMS`,
      clean-venv install.
-   - **publish**: creates or updates the GitHub Release and uploads the assets.
+   - **publish**: generates the changelog notes, creates or updates the GitHub
+     Release, and uploads the assets.
+   - **changelog**: prepends the release entry to `CHANGELOG.md` and pushes it
+     to `main` (stable releases only).
    - **smoke**: downloads the published `install.sh` / `install.ps1` and
      installs the release into a clean venv on Ubuntu, macOS, and Windows.
 
@@ -98,8 +126,12 @@ Start from a clean, green `main`.
 
    ```bash
    gh release view v0.2.0 --json tagName,isPrerelease,assets
+   gh release view v0.2.0 --json body
    gh release download v0.2.0 --pattern "SHA256SUMS" --dir /tmp/verso-release
    ```
+
+   The description should list the commits since the previous tag, and the
+   same section should appear at the top of `CHANGELOG.md` on `main`.
 
 7. Install from the release in a clean environment:
 
@@ -131,7 +163,8 @@ installer.
 
 3. Tag and push `v0.2.0-rc1`.
 4. Confirm the release is marked **Pre-release**, has all five assets, and that
-   `/releases/latest` does not point at it.
+   `/releases/latest` does not point at it. Its description is the generated
+   changelog; `CHANGELOG.md` on `main` is not touched for prereleases.
 5. Install it on each platform with `--version v0.2.0-rc1` /
    `-Version v0.2.0-rc1`.
 6. Delete the rehearsal:
@@ -154,9 +187,10 @@ gh workflow run release.yml -f tag=v0.2.0
 ```
 
 The workflow is idempotent: if the release exists, it uploads assets with
-`--clobber` and updates the title, prerelease flag, and latest flag. This is
-only for repairing a failed or incomplete run. Do not publish different bytes
-under a version users have already downloaded.
+`--clobber` and updates the title, description, prerelease flag, and latest
+flag. A re-run also replaces that version's `CHANGELOG.md` section instead of
+duplicating it. This is only for repairing a failed or incomplete run. Do not
+publish different bytes under a version users have already downloaded.
 
 Demote a release:
 
